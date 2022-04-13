@@ -1,11 +1,14 @@
 use chrono::Utc;
 use clap::Parser;
+use crossterm::{
+    event::{self, KeyCode, KeyEvent, KeyModifiers},
+    execute, terminal,
+};
 use eyre::Result;
-use std::env;
-use std::{io::stdout, ops::Sub, time::Duration};
-use termion::{event::Key, input::MouseTerminal, raw::IntoRawMode, screen::AlternateScreen};
+use std::{env, io::Write, ops::Sub, time::Duration};
+
 use tui::{
-    backend::{Backend, TermionBackend},
+    backend::{Backend, CrosstermBackend},
     layout::{Alignment, Constraint, Corner, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Span, Spans, Text},
@@ -22,7 +25,6 @@ use atuin_client::{
     settings::{FilterMode, SearchMode, Settings},
 };
 
-use super::event::{Event, Events};
 use super::history::ListMode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -275,14 +277,17 @@ async fn query_results(
 }
 
 async fn key_handler(
-    input: Key,
+    input: KeyEvent,
     search_mode: SearchMode,
     db: &mut (impl Database + Send + Sync),
     app: &mut State,
 ) -> Option<String> {
-    match input {
-        Key::Esc | Key::Ctrl('c' | 'd' | 'g') => return Some(String::from("")),
-        Key::Char('\n') => {
+    match input.code {
+        KeyCode::Esc => return Some(String::from("")),
+        KeyCode::Char('c' | 'd' | 'g') if input.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Some(String::from(""))
+        }
+        KeyCode::Enter => {
             let i = app.results_state.selected().unwrap_or(0);
 
             return Some(
@@ -291,7 +296,11 @@ async fn key_handler(
                     .map_or(app.input.clone(), |h| h.command.clone()),
             );
         }
-        Key::Alt(c) if ('1'..='9').contains(&c) => {
+        KeyCode::Down => app.down(),
+        KeyCode::Char('n') if input.modifiers.contains(KeyModifiers::CONTROL) => app.down(),
+        KeyCode::Up => app.up(),
+        KeyCode::Char('p') if input.modifiers.contains(KeyModifiers::CONTROL) => app.up(),
+        KeyCode::Char(c @ '1'..='9') if input.modifiers.contains(KeyModifiers::ALT) => {
             let c = c.to_digit(10)? as usize;
             let i = app.results_state.selected()? + c;
 
@@ -301,16 +310,12 @@ async fn key_handler(
                     .map_or(app.input.clone(), |h| h.command.clone()),
             );
         }
-        Key::Char(c) => {
-            app.input.push(c);
-            query_results(app, search_mode, db).await.unwrap();
-        }
-        Key::Backspace => {
+        KeyCode::Backspace => {
             app.input.pop();
             query_results(app, search_mode, db).await.unwrap();
         }
         // \u{7f} is escape sequence for backspace
-        Key::Alt('\u{7f}') => {
+        KeyCode::Char('\u{7f}') if input.modifiers.contains(KeyModifiers::ALT) => {
             let words: Vec<&str> = app.input.split(' ').collect();
             if words.is_empty() {
                 return None;
@@ -322,11 +327,11 @@ async fn key_handler(
             }
             query_results(app, search_mode, db).await.unwrap();
         }
-        Key::Ctrl('u') => {
+        KeyCode::Char('u') if input.modifiers.contains(KeyModifiers::CONTROL) => {
             app.input = String::from("");
             query_results(app, search_mode, db).await.unwrap();
         }
-        Key::Ctrl('r') => {
+        KeyCode::Char('r') if input.modifiers.contains(KeyModifiers::CONTROL) => {
             app.filter_mode = match app.filter_mode {
                 FilterMode::Global => FilterMode::Host,
                 FilterMode::Host => FilterMode::Session,
@@ -336,36 +341,31 @@ async fn key_handler(
 
             query_results(app, search_mode, db).await.unwrap();
         }
-        Key::Down | Key::Ctrl('n') => {
-            let i = match app.results_state.selected() {
-                Some(i) => {
-                    if i == 0 {
-                        0
-                    } else {
-                        i - 1
-                    }
-                }
-                None => 0,
-            };
-            app.results_state.select(Some(i));
-        }
-        Key::Up | Key::Ctrl('p') => {
-            let i = match app.results_state.selected() {
-                Some(i) => {
-                    if i >= app.results.len() - 1 {
-                        app.results.len() - 1
-                    } else {
-                        i + 1
-                    }
-                }
-                None => 0,
-            };
-            app.results_state.select(Some(i));
+        KeyCode::Char(c) => {
+            app.input.push(c);
+            query_results(app, search_mode, db).await.unwrap();
         }
         _ => {}
     };
 
     None
+}
+
+impl State {
+    fn down(&mut self) {
+        let i = match self.results_state.selected() {
+            Some(i) => i.saturating_sub(1),
+            None => 0,
+        };
+        self.results_state.select(Some(i));
+    }
+    fn up(&mut self) {
+        let i = match self.results_state.selected() {
+            Some(i) => (i + 1).min(self.results.len() - 1),
+            None => 0,
+        };
+        self.results_state.select(Some(i));
+    }
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -521,6 +521,41 @@ fn draw_compact<T: Backend>(f: &mut Frame<'_, T>, history_count: i64, app: &mut 
     );
 }
 
+struct Stdout {
+    stdout: std::fs::File,
+}
+
+impl Stdout {
+    pub fn new() -> std::io::Result<Self> {
+        terminal::enable_raw_mode()?;
+        // let mut stdout = stdout();
+        let mut stdout = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")?;
+        execute!(stdout, terminal::EnterAlternateScreen)?;
+        // execute!(stdout, event::EnableMouseCapture)?;
+        Ok(Self { stdout })
+    }
+}
+
+impl Drop for Stdout {
+    fn drop(&mut self) {
+        execute!(self.stdout, terminal::LeaveAlternateScreen).unwrap();
+        terminal::disable_raw_mode().unwrap();
+    }
+}
+
+impl Write for Stdout {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.stdout.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stdout.flush()
+    }
+}
+
 // this is a big blob of horrible! clean it up!
 // for now, it works. But it'd be great if it were more easily readable, and
 // modular. I'd like to add some more stats and stuff at some point
@@ -532,14 +567,9 @@ async fn select_history(
     style: atuin_client::settings::Style,
     db: &mut (impl Database + Send + Sync),
 ) -> Result<String> {
-    let stdout = stdout().into_raw_mode()?;
-    let stdout = MouseTerminal::from(stdout);
-    let stdout = AlternateScreen::from(stdout);
-    let backend = TermionBackend::new(stdout);
+    let stdout = Stdout::new()?;
+    let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
-    // Setup event handlers
-    let events = Events::new();
 
     let mut app = State {
         input: query.join(" "),
@@ -554,9 +584,11 @@ async fn select_history(
     loop {
         let history_count = db.history_count().await?;
         // Handle input
-        if let Event::Input(input) = events.next()? {
-            if let Some(output) = key_handler(input, search_mode, db, &mut app).await {
-                return Ok(output);
+        if event::poll(Duration::from_millis(250))? {
+            if let event::Event::Key(input) = event::read()? {
+                if let Some(output) = key_handler(input, search_mode, db, &mut app).await {
+                    return Ok(output);
+                }
             }
         }
 
