@@ -9,7 +9,7 @@ use atuin_client::{
     database::Database,
     history::History,
     import::{
-        bash::Bash, fish::Fish, resh::Resh, zsh::Zsh, zsh_histdb::ZshHistDb, Importer, Loader,
+        bash::Bash, fish::Fish, resh::Resh, zsh::Zsh, zsh_histdb::ZshHistDb, mcfly::McFly, Importer, Loader,
     },
 };
 
@@ -29,6 +29,8 @@ pub enum Cmd {
     Resh,
     /// Import history from the fish history file
     Fish,
+    /// Import history from the McFly history file
+    McFly,
 }
 
 const BATCH_SIZE: usize = 100;
@@ -74,6 +76,7 @@ impl Cmd {
             Self::Bash => import::<Bash, DB>(db).await,
             Self::Resh => import::<Resh, DB>(db).await,
             Self::Fish => import::<Fish, DB>(db).await,
+            Self::McFly => import::<McFly, DB>(db).await,
         }
     }
 }

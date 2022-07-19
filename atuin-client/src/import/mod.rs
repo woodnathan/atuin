@@ -11,6 +11,7 @@ pub mod fish;
 pub mod resh;
 pub mod zsh;
 pub mod zsh_histdb;
+pub mod mcfly;
 
 #[async_trait]
 pub trait Importer: Sized {
